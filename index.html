@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Log Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+
+        #log {
+            white-space: pre-wrap;
+            background: #222;
+            color: #fff;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Container Log Stream</h1>
+    <div id="log">Connecting to log stream...</div>
+    <button onclick="disconnect()">Disconnect</button>
+
+    <script>
+        let ws;
+
+        function connect() {
+            ws = new WebSocket("ws://localhost:8080/logs");
+
+            ws.onopen = () => {
+                document.getElementById('log').textContent = "connected to websocket log stream\n";
+            };
+
+            ws.onmessage = (event) => {
+                const logContainer = document.getElementById('log');
+                logContainer.textContent += event.data + '\n';
+                logContainer.scrollTop = logContainer.scrollHeight; // Auto-scroll to the bottom
+            };
+
+            ws.onclose = () => {
+                document.getElementById('log').textContent += "\ndisconnected from log stream";
+            };
+
+            ws.onerror = (error) => {
+                console.error("websocker error:", error);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        // connect to WebSocket on page load
+        window.onload = connect;
+    </script>
+</body>
+
+</html>
