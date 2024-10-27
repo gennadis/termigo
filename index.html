@@ -4,51 +4,94 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebSocket Log Viewer</title>
+    <title>Interactive WebSocket Terminal</title>
     <style>
         body {
             font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
         }
 
-        #log {
+        #terminal {
             white-space: pre-wrap;
             background: #222;
             color: #fff;
             padding: 10px;
             height: 300px;
+            width: 80%;
             overflow-y: scroll;
+            margin-bottom: 10px;
+        }
+
+        #input {
+            width: 80%;
+            padding: 8px;
+            font-size: 16px;
+            background: #333;
+            color: #fff;
+            border: none;
+            outline: none;
+        }
+
+        #input::placeholder {
+            color: #aaa;
+        }
+
+        button {
+            margin-top: 10px;
+            padding: 8px 16px;
+            font-size: 16px;
         }
     </style>
 </head>
 
 <body>
-    <h1>Container Log Stream</h1>
-    <div id="log">Connecting to log stream...</div>
+    <h1>Interactive Container Terminal</h1>
+    <div id="terminal">Connecting to terminal...</div>
+    <input type="text" id="input" placeholder="Type command here..." onkeydown="handleEnter(event)"
+        autocomplete="off" />
     <button onclick="disconnect()">Disconnect</button>
 
     <script>
         let ws;
 
         function connect() {
-            ws = new WebSocket("ws://localhost:8080/logs");
+            ws = new WebSocket("ws://localhost:8080/terminal");
 
             ws.onopen = () => {
-                document.getElementById('log').textContent = "connected to websocket log stream\n";
+                document.getElementById('terminal').textContent = "connected to terminal\n";
             };
 
             ws.onmessage = (event) => {
-                const logContainer = document.getElementById('log');
-                logContainer.textContent += event.data + '\n';
-                logContainer.scrollTop = logContainer.scrollHeight; // Auto-scroll to the bottom
+                const terminal = document.getElementById('terminal');
+                terminal.textContent += event.data + '\n';
+                terminal.scrollTop = terminal.scrollHeight; // Auto-scroll to the bottom
             };
 
             ws.onclose = () => {
-                document.getElementById('log').textContent += "\ndisconnected from log stream";
+                document.getElementById('terminal').textContent += "\ndisconnected from terminal";
             };
 
             ws.onerror = (error) => {
                 console.error("websocker error:", error);
             };
+        }
+
+        function handleEnter(event) {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                sendCommand();
+            }
+        }
+
+        function sendCommand() {
+            const inputField = document.getElementById('input');
+            const command = inputField.value.trim();
+            if (command && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(command);
+                inputField.value = ""; // clear input field
+            }
         }
 
         function disconnect() {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -17,9 +18,9 @@ import (
 )
 
 const (
-	alpine  = "alpine:latest"
-	logCmd  = "while true; do echo $(date); sleep 1; done"
-	wsRoute = "/logs"
+	alpine     = "alpine:latest"
+	initialCmd = "sh"
+	wsRoute    = "/terminal"
 )
 
 var (
@@ -68,7 +69,7 @@ func main() {
 	fmt.Println("server exited cleanly")
 }
 
-// handleWebSocket manages WebSocket connections and streams Docker container logs.
+// handleWebSocket manages WebSocket connections and streams Docker container commands.
 func handleWebSocket(ctx context.Context, cli *client.Client, w http.ResponseWriter, r *http.Request) {
 	if maxConnections <= 0 {
 		http.Error(w, "server is busy, please try again later", http.StatusServiceUnavailable)
@@ -84,66 +85,92 @@ func handleWebSocket(ctx context.Context, cli *client.Client, w http.ResponseWri
 
 	maxConnections--
 	defer func() { maxConnections++ }()
-
 	activeSessions.Add(1)
 	defer activeSessions.Done()
 
-	resp, err := runLogContainer(ctx, cli)
+	containerID, err := startInteractiveContainer(ctx, cli)
 	if err != nil {
 		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("error starting container: %v", err)))
 		return
 	}
 
-	// Ensure container cleanup
 	defer func() {
-		if err := cli.ContainerKill(ctx, resp.ID, "SIGKILL"); err != nil {
-			log.Printf("failed to stop container %s: %v", resp.ID, err)
-		}
-		if err := cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true}); err != nil {
-			log.Printf("failed to remove container %s: %v", resp.ID, err)
-		}
+		stopAndRemoveContainer(ctx, cli, containerID)
 	}()
 
-	logs, err := cli.ContainerLogs(ctx, resp.ID, container.LogsOptions{ShowStdout: true, Follow: true})
+	attachResp, err := cli.ContainerAttach(ctx, containerID,
+		container.AttachOptions{
+			Stream: true,
+			Stdin:  true,
+			Stdout: true,
+			Stderr: true,
+		})
 	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("failed to get logs: %v", err)))
+		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("error attaching to container: %v", err)))
 		return
 	}
-	defer logs.Close()
+	defer attachResp.Close()
 
-	streamLogs(conn, logs)
+	go readContainerOutput(conn, attachResp.Reader)
+	readWebSocketInput(conn, attachResp.Conn)
 }
 
-// runLogContainer creates and starts a Docker container that runs a continuous logging command.
-func runLogContainer(ctx context.Context, cli *client.Client) (container.CreateResponse, error) {
+// startInteractiveContainer creates and starts a Docker container with an interactive shell.
+func startInteractiveContainer(ctx context.Context, cli *client.Client) (string, error) {
 	cfg := &container.Config{
-		Image: alpine,
-		Cmd:   []string{"sh", "-c", logCmd},
-		Tty:   true,
+		Image:     alpine,
+		Cmd:       []string{initialCmd},
+		Tty:       true,
+		OpenStdin: true,
 	}
 
 	resp, err := cli.ContainerCreate(ctx, cfg, nil, nil, nil, "")
 	if err != nil {
-		return container.CreateResponse{}, fmt.Errorf("error creating container: %w", err)
+		return "", fmt.Errorf("error creating container: %w", err)
 	}
 
 	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		return container.CreateResponse{}, fmt.Errorf("error starting container: %w", err)
+		return "", fmt.Errorf("error starting container: %w", err)
 	}
-	return resp, nil
+	return resp.ID, nil
 }
 
-// streamLogs continuously streams logs from Docker to WebSocket
-func streamLogs(conn *websocket.Conn, logs io.Reader) {
-	buf := make([]byte, 1024)
-	for {
-		n, err := logs.Read(buf)
-		if err != nil {
-			conn.WriteMessage(websocket.TextMessage, []byte("error reading logs: "+err.Error()))
+// stopAndRemoveContainer stops and removes a Docker container.
+func stopAndRemoveContainer(ctx context.Context, cli *client.Client, containerID string) {
+	if err := cli.ContainerKill(ctx, containerID, "SIGKILL"); err != nil {
+		log.Printf("failed to stop container %s: %v", containerID, err)
+	}
+	if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); err != nil {
+		log.Printf("failed to remove container %s: %v", containerID, err)
+	}
+}
+
+// readContainerOutput reads output from the container and sends it over WebSocket.
+func readContainerOutput(conn *websocket.Conn, reader io.Reader) {
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		if err := conn.WriteMessage(websocket.TextMessage, scanner.Bytes()); err != nil {
+			log.Printf("error writing to WebSocket: %v", err)
 			break
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, buf[:n]); err != nil {
-			log.Printf("error writing to websocket: %v", err)
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("error reading container output: %v", err)
+	}
+}
+
+// readWebSocketInput reads input from WebSocket and sends it to the container.
+func readWebSocketInput(conn *websocket.Conn, containerStdin io.WriteCloser) {
+	defer containerStdin.Close()
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("websocket read error: %v", err)
+			break
+		}
+		_, err = containerStdin.Write(append(message, '\n'))
+		if err != nil {
+			log.Printf("error writing to container stdin: %v", err)
 			break
 		}
 	}
