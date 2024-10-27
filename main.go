@@ -9,22 +9,46 @@ import (
 	"github.com/docker/docker/client"
 )
 
+const (
+	alpine = "alpine:latest"
+	shell  = "./bin/sh"
+)
+
 func main() {
 	ctx := context.Background()
-	apiClient, err := client.NewClientWithOpts(client.FromEnv)
+
+	cli, err := initDockerClient(ctx)
 	if err != nil {
-		log.Fatalf("failed to init API client: %v", err)
+		log.Fatalf("error connecting Docker engine: %v", err)
 	}
-	defer apiClient.Close()
+	defer cli.Close()
 
-	apiClient.NegotiateAPIVersion(ctx)
+	cli.NegotiateAPIVersion(ctx)
 
-	containers, err := apiClient.ContainerList(ctx, container.ListOptions{All: true})
+	cfg := &container.Config{
+		Image: alpine,
+		Tty:   true,
+		Cmd:   []string{shell},
+	}
+
+	resp, err := cli.ContainerCreate(ctx, cfg, nil, nil, nil, "")
 	if err != nil {
-		log.Fatalf("failed to get containter list: %v", err)
+		log.Fatalf("error creating %s container: %v", alpine, err)
 	}
 
-	for i, ctr := range containers {
-		fmt.Printf("%d: image: %s, status: %s\n", i+1, ctr.Image, ctr.Status)
+	cli.ContainerStart(ctx, resp.ID, container.StartOptions{})
+	fmt.Printf("conrainer with image %q started: id %s\n", alpine, resp.ID)
+
+	cli.ContainerKill(ctx, resp.ID, "SIGKILL")
+	fmt.Printf("conrainer %s stopped\n", resp.ID)
+}
+
+// initDockerClient sets up and returns a Docker client.
+func initDockerClient(ctx context.Context) (*client.Client, error) {
+	c, err := client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		return nil, err
 	}
+	c.NegotiateAPIVersion(ctx)
+	return c, nil
 }
